@@ -1,25 +1,30 @@
+import { BaseError, parseEther } from 'viem';
 import { Session, Dispute, ContractEvent, Tutor } from '../types';
+import { publicClient, getWalletClient } from './blockchainClient';
+import { TUTOR_MARKETPLACE_ABI, TUTOR_MARKETPLACE_ADDRESS } from './contractConfig';
+
+type ContractWriteName = Extract<(typeof TUTOR_MARKETPLACE_ABI)[number], { type: 'function' }>['name'];
 
 // Hardcoded users with Ethereum wallets
 export const HARDCODED_USERS = {
   student: {
-    address: '0x1234567890123456789012345678901234567890',
+    address: '0xa4f79d2D42cc00D01f7deB382734E3FC3fe9cE23',
     name: 'Alice Johnson',
     role: 'student' as const,
   },
   tutor: {
-    address: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    address: '0x5F6056A3d86B7fF123F260730c11Eef8C910ec85',
     name: 'Dr. Sarah Chen',
     role: 'tutor' as const,
     subject: 'Mathematics',
-    hourlyRate: 0.05,
+    hourlyRate: 0.00005,
     rating: 4.9,
     totalSessions: 127,
     verified: true,
     bio: 'PhD in Mathematics with 10+ years of teaching experience.',
   },
   admin: {
-    address: '0xADMIN00000000000000000000000000000000000',
+    address: '0xAb77a619A330d9a6cE2D4ACD514D3edF4b60275A',
     name: 'Admin User',
     role: 'admin' as const,
   },
@@ -29,10 +34,10 @@ export const HARDCODED_USERS = {
 const initialTutors: Tutor[] = [
   {
     id: '1',
-    address: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    address: '0x5F6056A3d86B7fF123F260730c11Eef8C910ec85',
     name: 'Dr. Sarah Chen',
     subject: 'Mathematics',
-    hourlyRate: 0.05,
+    hourlyRate: 0.00005,
     rating: 4.9,
     totalSessions: 127,
     verified: true,
@@ -133,18 +138,83 @@ export function initializeStorage() {
   }
 }
 
-// Get next session ID
-function getNextSessionId(): number {
-  const counter = parseInt(localStorage.getItem(STORAGE_KEYS.SESSION_COUNTER) || '1');
-  localStorage.setItem(STORAGE_KEYS.SESSION_COUNTER, (counter + 1).toString());
-  return counter;
-}
-
 // Get next dispute ID
 function getNextDisputeId(): number {
   const counter = parseInt(localStorage.getItem(STORAGE_KEYS.DISPUTE_COUNTER) || '1');
   localStorage.setItem(STORAGE_KEYS.DISPUTE_COUNTER, (counter + 1).toString());
   return counter;
+}
+
+function setNextSessionCounter(nextId: number) {
+  localStorage.setItem(STORAGE_KEYS.SESSION_COUNTER, Math.max(nextId, 0).toString());
+}
+
+function getLocalSessions(): Session[] {
+  const data = localStorage.getItem(STORAGE_KEYS.SESSIONS);
+  return data ? JSON.parse(data) : [];
+}
+
+function setLocalSessions(sessions: Session[]) {
+  localStorage.setItem(STORAGE_KEYS.SESSIONS, JSON.stringify(sessions));
+}
+
+function toReadableError(error: unknown): Error {
+  if (error instanceof BaseError) {
+    return new Error(error.shortMessage || error.message);
+  }
+
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error('Unknown error');
+}
+
+async function executeContractWrite(
+  functionName: ContractWriteName,
+  args: readonly unknown[],
+  value?: bigint
+) {
+  try {
+    const walletClient = await getWalletClient();
+    const [account] = await walletClient.getAddresses();
+
+    if (!account) {
+      throw new Error('Connect MetaMask before continuing.');
+    }
+
+    const hash = await walletClient.writeContract({
+      address: TUTOR_MARKETPLACE_ADDRESS,
+      abi: TUTOR_MARKETPLACE_ABI,
+      functionName,
+      args,
+      account,
+      ...(value !== undefined ? { value } : {}),
+    });
+
+    await publicClient.waitForTransactionReceipt({ hash });
+
+    return hash;
+  } catch (error) {
+    throw toReadableError(error);
+  }
+}
+
+function updateLocalSession(
+  sessionId: number,
+  updater: (session: Session) => Session
+): Session | undefined {
+  const sessions = getLocalSessions();
+  const index = sessions.findIndex(s => s.id === sessionId);
+
+  if (index === -1) {
+    return undefined;
+  }
+
+  const updated = updater({ ...sessions[index] });
+  sessions[index] = updated;
+  setLocalSessions(sessions);
+  return updated;
 }
 
 // Event logging
@@ -163,12 +233,11 @@ export function getTutors(): Tutor[] {
 
 // Sessions
 export function getSessions(): Session[] {
-  const data = localStorage.getItem(STORAGE_KEYS.SESSIONS);
-  return data ? JSON.parse(data) : [];
+  return getLocalSessions();
 }
 
 function saveSessions(sessions: Session[]) {
-  localStorage.setItem(STORAGE_KEYS.SESSIONS, JSON.stringify(sessions));
+  setLocalSessions(sessions);
 }
 
 export function getSessionById(id: number): Session | undefined {
@@ -200,7 +269,7 @@ export function getEvents(): ContractEvent[] {
  * Event: SessionRequested
  * Student requests a session with a tutor, deposits ETH into escrow
  */
-export function requestSession(
+export async function requestSession(
   studentAddress: string,
   tutorAddress: string,
   tutorName: string,
@@ -209,178 +278,214 @@ export function requestSession(
   duration: number,
   amount: number,
   details: string
-): number {
-  const sessions = getSessions();
-  const sessionId = getNextSessionId();
-  
-  const newSession: Session = {
-    id: sessionId,
-    studentAddress,
-    tutorAddress,
-    tutorName,
-    subject,
-    date,
-    duration,
-    amount,
-    status: 'pending',
-    details,
-    requestedAt: Date.now(),
-  };
-  
-  sessions.push(newSession);
-  saveSessions(sessions);
-  
-  logEvent({
-    type: 'SessionRequested',
-    sessionId,
-    timestamp: Date.now(),
-    data: { studentAddress, tutorAddress, amount },
-  });
-  
-  return sessionId;
+): Promise<number> {
+  try {
+    const counterBefore = (await publicClient.readContract({
+      address: TUTOR_MARKETPLACE_ADDRESS,
+      abi: TUTOR_MARKETPLACE_ABI,
+      functionName: 'sessionCounter',
+    })) as bigint;
+
+    await executeContractWrite('requestSession', [tutorAddress, details], parseEther(amount.toString()));
+
+    const sessionId = Number(counterBefore);
+
+    const sessions = getLocalSessions();
+    const newSession: Session = {
+      id: sessionId,
+      studentAddress,
+      tutorAddress,
+      tutorName,
+      subject,
+      date,
+      duration,
+      amount,
+      status: 'pending',
+      details,
+      requestedAt: Date.now(),
+    };
+
+    sessions.push(newSession);
+    setLocalSessions(sessions);
+    setNextSessionCounter(sessionId + 1);
+
+    logEvent({
+      type: 'SessionRequested',
+      sessionId,
+      timestamp: Date.now(),
+      data: { studentAddress, tutorAddress, amount },
+    });
+
+    return sessionId;
+  } catch (error) {
+    throw toReadableError(error);
+  }
 }
 
 /**
  * Event: SessionAccepted
  * Tutor accepts the session request
  */
-export function acceptSession(sessionId: number): boolean {
-  const sessions = getSessions();
-  const session = sessions.find(s => s.id === sessionId);
-  
-  if (!session || session.status !== 'pending') {
-    return false;
+export async function acceptSession(sessionId: number): Promise<void> {
+  try {
+    await executeContractWrite('acceptSession', [BigInt(sessionId)]);
+
+    const updated = updateLocalSession(sessionId, session => ({
+      ...session,
+      status: 'accepted',
+    }));
+
+    if (!updated) {
+      throw new Error('Session not found locally. Refresh and try again.');
+    }
+
+    logEvent({
+      type: 'SessionAccepted',
+      sessionId,
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    throw toReadableError(error);
   }
-  
-  session.status = 'accepted';
-  saveSessions(sessions);
-  
-  logEvent({
-    type: 'SessionAccepted',
-    sessionId,
-    timestamp: Date.now(),
-  });
-  
-  return true;
 }
 
 /**
  * Event: SessionRejected
  * Tutor rejects the session, funds returned to student
  */
-export function rejectSession(sessionId: number): boolean {
-  const sessions = getSessions();
-  const session = sessions.find(s => s.id === sessionId);
-  
-  if (!session || session.status !== 'pending') {
-    return false;
+export async function rejectSession(sessionId: number): Promise<void> {
+  try {
+    await executeContractWrite('rejectSession', [BigInt(sessionId)]);
+
+    const updated = updateLocalSession(sessionId, session => ({
+      ...session,
+      status: 'rejected',
+    }));
+
+    if (!updated) {
+      throw new Error('Session not found locally. Refresh and try again.');
+    }
+
+    logEvent({
+      type: 'SessionRejected',
+      sessionId,
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    throw toReadableError(error);
   }
-  
-  session.status = 'rejected';
-  saveSessions(sessions);
-  
-  logEvent({
-    type: 'SessionRejected',
-    sessionId,
-    timestamp: Date.now(),
-  });
-  
-  return true;
 }
 
 /**
  * Event: SessionCompleted
  * Tutor marks session as completed/delivered
  */
-export function completeSession(sessionId: number): boolean {
-  const sessions = getSessions();
-  const session = sessions.find(s => s.id === sessionId);
-  
-  if (!session || session.status !== 'accepted') {
-    return false;
+export async function completeSession(sessionId: number): Promise<void> {
+  try {
+    await executeContractWrite('markCompleted', [BigInt(sessionId)]);
+
+    const updated = updateLocalSession(sessionId, session => ({
+      ...session,
+      status: 'delivered',
+    }));
+
+    if (!updated) {
+      throw new Error('Session not found locally. Refresh and try again.');
+    }
+
+    logEvent({
+      type: 'SessionCompleted',
+      sessionId,
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    throw toReadableError(error);
   }
-  
-  session.status = 'delivered';
-  saveSessions(sessions);
-  
-  logEvent({
-    type: 'SessionCompleted',
-    sessionId,
-    timestamp: Date.now(),
-  });
-  
-  return true;
 }
 
 /**
  * Event: SessionConfirmed
  * Student confirms session completion, funds released to tutor
  */
-export function confirmSession(sessionId: number): boolean {
-  const sessions = getSessions();
-  const session = sessions.find(s => s.id === sessionId);
-  
-  if (!session || session.status !== 'delivered') {
-    return false;
+export async function confirmSession(sessionId: number): Promise<void> {
+  try {
+    await executeContractWrite('confirmSession', [BigInt(sessionId)]);
+
+    const updated = updateLocalSession(sessionId, session => ({
+      ...session,
+      status: 'confirmed',
+      completedAt: Date.now(),
+    }));
+
+    if (!updated) {
+      throw new Error('Session not found locally. Refresh and try again.');
+    }
+
+    logEvent({
+      type: 'SessionConfirmed',
+      sessionId,
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    throw toReadableError(error);
   }
-  
-  session.status = 'confirmed';
-  session.completedAt = Date.now();
-  saveSessions(sessions);
-  
-  logEvent({
-    type: 'SessionConfirmed',
-    sessionId,
-    timestamp: Date.now(),
-  });
-  
-  return true;
 }
 
 /**
  * Event: DisputeOpened
  * Student opens a dispute for a delivered session
  */
-export function openDispute(
+export async function openDispute(
   sessionId: number,
   studentAddress: string,
   tutorAddress: string,
   reason: string
-): number {
-  const sessions = getSessions();
-  const session = sessions.find(s => s.id === sessionId);
-  
-  if (!session || session.status !== 'delivered') {
-    throw new Error('Cannot open dispute for this session');
+): Promise<number> {
+  try {
+    const session = getSessionById(sessionId);
+
+    if (!session || session.status !== 'delivered') {
+      throw new Error('Cannot open dispute for this session');
+    }
+
+    await executeContractWrite('openDispute', [BigInt(sessionId)]);
+
+    const updated = updateLocalSession(sessionId, current => ({
+      ...current,
+      status: 'disputed',
+    }));
+
+    if (!updated) {
+      throw new Error('Session not found locally. Refresh and try again.');
+    }
+
+    const disputes = getDisputes();
+    const disputeId = getNextDisputeId();
+
+    const newDispute: Dispute = {
+      id: disputeId,
+      sessionId,
+      studentAddress,
+      tutorAddress,
+      reason,
+      openedAt: Date.now(),
+      status: 'open',
+    };
+
+    disputes.push(newDispute);
+    saveDisputes(disputes);
+
+    logEvent({
+      type: 'DisputeOpened',
+      sessionId,
+      timestamp: Date.now(),
+      data: { disputeId, reason },
+    });
+
+    return disputeId;
+  } catch (error) {
+    throw toReadableError(error);
   }
-  
-  session.status = 'disputed';
-  saveSessions(sessions);
-  
-  const disputes = getDisputes();
-  const disputeId = getNextDisputeId();
-  
-  const newDispute: Dispute = {
-    id: disputeId,
-    sessionId,
-    studentAddress,
-    tutorAddress,
-    reason,
-    openedAt: Date.now(),
-    status: 'open',
-  };
-  
-  disputes.push(newDispute);
-  saveDisputes(disputes);
-  
-  logEvent({
-    type: 'DisputeOpened',
-    sessionId,
-    timestamp: Date.now(),
-    data: { disputeId, reason },
-  });
-  
-  return disputeId;
 }
 
 /**

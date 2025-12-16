@@ -3,10 +3,10 @@ import { Tutor, Session, Dispute } from '../types';
 export const mockTutors: Tutor[] = [
   {
     id: '1',
-    address: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+    address: '0x5F6056A3d86B7fF123F260730c11Eef8C910ec85',
     name: 'Dr. Sarah Chen',
     subject: 'Mathematics',
-    hourlyRate: 0.05,
+    hourlyRate: 0.00005,
     rating: 4.9,
     totalSessions: 127,
     verified: true,
