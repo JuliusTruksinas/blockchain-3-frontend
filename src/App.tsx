@@ -5,8 +5,11 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { UserCircle2, GraduationCap, Shield } from 'lucide-react';
 import { initializeStorage, HARDCODED_USERS } from './services/dataService';
 import { Toaster } from './components/ui/sonner';
+import { SecretWalletGate } from './components/SecretWalletGate';
 
 type UserRole = 'student' | 'tutor' | 'admin';
+
+const SECRET_ROUTE = '/wallets';
 
 export default function App() {
   const [userRole, setUserRole] = useState<UserRole>('student');
@@ -15,6 +18,19 @@ export default function App() {
   useEffect(() => {
     initializeStorage();
   }, []);
+
+  const isSecretRoute = (() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    const normalizedPath = window.location.pathname.replace(/\/+$/, '') || '/';
+    return normalizedPath === SECRET_ROUTE;
+  })();
+
+  if (isSecretRoute) {
+    return <SecretWalletGate />;
+  }
 
   // Get current user data based on role
   const getCurrentUser = () => {
