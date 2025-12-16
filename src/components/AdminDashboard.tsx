@@ -39,14 +39,14 @@ export function AdminDashboard({ connectedAddress }: AdminDashboardProps) {
   const handleResolveDispute = async (disputeId: number, decision: 'refund_student' | 'pay_tutor') => {
     const decisionText = decision === 'refund_student' ? 'Refunded to Student' : 'Paid to Tutor';
     const favorStudent = decision === 'refund_student';
-    
-    const success = resolveDispute(disputeId, decisionText, favorStudent);
-    
-    if (success) {
-      toast.success(`Dispute resolved: ${decisionText}`);
+
+    try {
+      const txHash = await resolveDispute(disputeId, decisionText, favorStudent);
+      toast.success(`Dispute resolved: ${decisionText}. Tx: ${txHash.slice(0, 10)}…`);
       loadDisputes();
-    } else {
-      toast.error('Failed to resolve dispute');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to resolve dispute';
+      toast.error(message);
     }
   };
 

@@ -177,11 +177,24 @@ async function executeContractWrite(
 ) {
   try {
     const walletClient = await getWalletClient();
-    const [account] = await walletClient.getAddresses();
+    let [account] = await walletClient.getAddresses();
+
+    if (!account) {
+      console.info('[contract] No signer detected, requesting addresses from MetaMask');
+      const requested = await walletClient.requestAddresses();
+      account = requested[0];
+    }
 
     if (!account) {
       throw new Error('Connect MetaMask before continuing.');
     }
+
+    console.info('[contract] Sending transaction', {
+      functionName,
+      args,
+      value: value?.toString(),
+      account,
+    });
 
     const hash = await walletClient.writeContract({
       address: TUTOR_MARKETPLACE_ADDRESS,
@@ -192,10 +205,13 @@ async function executeContractWrite(
       ...(value !== undefined ? { value } : {}),
     });
 
+    console.info('[contract] Waiting for confirmation', { hash });
     await publicClient.waitForTransactionReceipt({ hash });
+    console.info('[contract] Transaction mined', { hash });
 
     return hash;
   } catch (error) {
+    console.error('[contract] Transaction failed', { functionName, args, error });
     throw toReadableError(error);
   }
 }
@@ -280,6 +296,10 @@ export async function requestSession(
   details: string
 ): Promise<number> {
   try {
+    console.info('[contract] requestSession invoked', {
+      tutorAddress,
+      amount,
+    });
     const counterBefore = (await publicClient.readContract({
       address: TUTOR_MARKETPLACE_ADDRESS,
       abi: TUTOR_MARKETPLACE_ABI,
@@ -318,6 +338,7 @@ export async function requestSession(
 
     return sessionId;
   } catch (error) {
+    console.error('[contract] requestSession failed', error);
     throw toReadableError(error);
   }
 }
@@ -492,39 +513,46 @@ export async function openDispute(
  * Event: DisputeResolved
  * Admin resolves a dispute, deciding fund allocation
  */
-export function resolveDispute(
+export async function resolveDispute(
   disputeId: number,
   decision: string,
   favorStudent: boolean
-): boolean {
-  const disputes = getDisputes();
-  const dispute = disputes.find(d => d.id === disputeId);
-  
-  if (!dispute || dispute.status !== 'open') {
-    return false;
+): Promise<string> {
+  try {
+    const disputes = getDisputes();
+    const dispute = disputes.find(d => d.id === disputeId);
+
+    if (!dispute || dispute.status !== 'open') {
+      throw new Error('Dispute not found or already resolved.');
+    }
+
+    const txHash = await executeContractWrite('resolveDispute', [BigInt(dispute.sessionId), favorStudent]);
+
+    dispute.status = 'resolved';
+    dispute.resolution = decision;
+    dispute.resolvedAt = Date.now();
+    saveDisputes(disputes);
+
+    const updated = updateLocalSession(dispute.sessionId, session => ({
+      ...session,
+      status: 'resolved',
+    }));
+
+    if (!updated) {
+      throw new Error('Session not found locally. Refresh and try again.');
+    }
+
+    logEvent({
+      type: 'DisputeResolved',
+      sessionId: dispute.sessionId,
+      timestamp: Date.now(),
+      data: { disputeId, decision, favorStudent },
+    });
+
+    return txHash;
+  } catch (error) {
+    throw toReadableError(error);
   }
-  
-  dispute.status = 'resolved';
-  dispute.resolution = decision;
-  dispute.resolvedAt = Date.now();
-  saveDisputes(disputes);
-  
-  // Update session status
-  const sessions = getSessions();
-  const session = sessions.find(s => s.id === dispute.sessionId);
-  if (session) {
-    session.status = 'resolved';
-    saveSessions(sessions);
-  }
-  
-  logEvent({
-    type: 'DisputeResolved',
-    sessionId: dispute.sessionId,
-    timestamp: Date.now(),
-    data: { disputeId, decision, favorStudent },
-  });
-  
-  return true;
 }
 
 // Utility to clear all data (for testing/reset)
