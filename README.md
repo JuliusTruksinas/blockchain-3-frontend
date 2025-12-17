@@ -3,6 +3,9 @@
 A decentralized tutor marketplace built with **Solidity** and **React**, where students can securely book tutoring sessions, tutors can manage requests, and payments are handled transparently through smart contracts with dispute resolution by an admin.
 
 ---
+![Tutor Marketplace Sequence Diagram](sequenceDiagra,.png)
+
+---
 
 ## 📌 Overview
 
